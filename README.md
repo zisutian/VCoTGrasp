@@ -1,0 +1,4 @@
+使用lmdb重写了train.py和eval_cli.py
+
+checkpoint内应该有pretrained文件夹存放paligemma2预训练模型,可以有vcot文件夹存放训练好的vcot模型用于load_checkpoints
+checkpoints文件夹存放训练时的模型检查点
