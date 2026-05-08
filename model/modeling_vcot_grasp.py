@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from contextlib import contextmanager
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -18,7 +19,7 @@ from transformers.utils import (
 )
 
 from transformers import PaliGemmaForConditionalGeneration, AutoModelForCausalLM, AutoModel
-from .configuration_vcot_grasp import VCoTGraspConfig, ArchConfig
+from .configuration_vcot_grasp import VCoTGraspConfig
 from .action_head import L1RegressionActionHead, DiffusionActionHead
 from constants import *
 
@@ -26,6 +27,14 @@ if is_flash_attn_2_available():
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
 
 logger = logging.get_logger(__name__)
+
+DEFAULT_TORCH_DTYPE = torch.bfloat16
+
+MLP_ACTION_HEAD_TYPE = "MLP"
+DIFFUSION_ACTION_HEAD_TYPE = "Diffusion"
+LM_PRETRAINED_ACTION_HEAD_TYPE = "LM_pretrained"
+LM_NEW_ACTION_HEAD_TYPE = "LM_new"
+LM_ACTION_HEAD_TYPES = (LM_PRETRAINED_ACTION_HEAD_TYPE, LM_NEW_ACTION_HEAD_TYPE)
 
 
 @dataclass
@@ -94,8 +103,31 @@ class VCoTGraspPreTrainedModel(PreTrainedModel):
     _supports_flash_attn_2 = True
     _supports_sdpa = True
 
+    @staticmethod
+    def _get_torch_dtype(config, fallback=DEFAULT_TORCH_DTYPE):
+        torch_dtype = getattr(config, "torch_dtype", None)
+        if isinstance(torch_dtype, torch.dtype):
+            return torch_dtype
+        if isinstance(torch_dtype, str):
+            return getattr(torch, torch_dtype)
+        return fallback
+
+    @staticmethod
+    @contextmanager
+    def _set_default_torch_dtype(torch_dtype):
+        old_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch_dtype)
+        try:
+            yield
+        finally:
+            torch.set_default_dtype(old_dtype)
+
     def init_weights(self):
-        paligemma = PaliGemmaForConditionalGeneration.from_pretrained(paligemma_model_id, cache_dir=pretrained_paligemma_dir)
+        paligemma = PaliGemmaForConditionalGeneration.from_pretrained(
+            paligemma_model_id,
+            cache_dir=pretrained_paligemma_dir,
+            torch_dtype=self._get_torch_dtype(self.config),
+        )
         paligemma.language_model.resize_token_embeddings(self.vocab_size)
 
         lanuage_model_weights = paligemma.language_model.state_dict()
@@ -106,8 +138,11 @@ class VCoTGraspPreTrainedModel(PreTrainedModel):
         self.image_encoder.load_state_dict(image_encoder_weights, strict=False)
         self.image_projector.load_state_dict(image_projector_weights)
 
-        if self.action_head_type == "LM_new":
-            self.resize_token_embeddings(257154 + 1024, pad_to_multiple_of=8)
+        if self.action_head_type == LM_NEW_ACTION_HEAD_TYPE:
+            self.resize_token_embeddings(
+                self.config._vocab_size + self.config.arch_config.lm_new_extra_token_count,
+                pad_to_multiple_of=self.config.arch_config.token_embedding_pad_multiple,
+            )
 
         self.tie_weights()
 
@@ -132,38 +167,15 @@ class VCoTGraspPreTrainedModel(PreTrainedModel):
 class VCoTGraspForConditionalGeneration(VCoTGraspPreTrainedModel, GenerationMixin):
     def __init__(self, config: VCoTGraspConfig):
         super().__init__(config)
-        language_model = AutoModelForCausalLM.from_config(config.text_config)
-        if language_model._tied_weights_keys is not None:
-            self._tied_weights_keys = [f"language_model.{k}" for k in language_model._tied_weights_keys]
-        self.language_model = language_model
+        self.model_dtype, self.text_dtype, self.vision_dtype = self._resolve_torch_dtypes(config)
 
-        self.image_encoder = AutoModel.from_config(config.vision_config)
-        self.image_projector = VCoTGraspImageProjector(config)
+        with self._set_default_torch_dtype(self.model_dtype):
+            self.language_model = self._build_language_model(config)
+            self.image_encoder = self._build_image_encoder(config)
+            self.image_projector = VCoTGraspImageProjector(config)
 
-        self.action_head_type = config.arch_config.action_head
-        if self.action_head_type == "MLP":
-            self.action_head = L1RegressionActionHead(
-                num_blocks=1,
-                input_dim=config.hidden_size,
-                hidden_dim=256,
-                action_dim=action_with_binned_angle_seq_len,
-                output_dim=1,
-            )
-            self.action_seq_len = action_with_binned_angle_seq_len
-        elif self.action_head_type == "Diffusion":
-            self.action_head = DiffusionActionHead(
-                token_size=5,
-                model_type="DiT-S",
-                in_channels=5,
-                future_action_window_size=0,
-                past_action_window_size=0,
-            )
-            self.action_seq_len = action_seq_len
-        elif self.action_head_type in ["LM_pretrained", "LM_new"]:
-            self.action_head = None
-            self.action_seq_len = 0
-        else:
-            raise NotImplementedError("Action head not implemented!")
+            self.action_head_type = config.arch_config.action_head
+            self.action_head, self.action_seq_len = self._build_action_head(config)
 
         self.vocab_size = self.config.text_config.vocab_size
         self.pad_token_id = self.config.pad_token_id
@@ -171,6 +183,37 @@ class VCoTGraspForConditionalGeneration(VCoTGraspPreTrainedModel, GenerationMixi
         self.dummy_action_token_index = self.config.dummy_action_token_index
 
         self.post_init()
+
+    def _resolve_torch_dtypes(self, config: VCoTGraspConfig):
+        model_dtype = self._get_torch_dtype(config)
+        text_dtype = self._get_torch_dtype(config.text_config, fallback=model_dtype)
+        vision_dtype = self._get_torch_dtype(config.vision_config, fallback=model_dtype)
+        return model_dtype, text_dtype, vision_dtype
+
+    def _build_language_model(self, config: VCoTGraspConfig):
+        language_model = AutoModelForCausalLM.from_config(config.text_config, torch_dtype=self.text_dtype)
+        if language_model._tied_weights_keys is not None:
+            self._tied_weights_keys = [f"language_model.{k}" for k in language_model._tied_weights_keys]
+        return language_model
+
+    def _build_image_encoder(self, config: VCoTGraspConfig):
+        return AutoModel.from_config(config.vision_config, torch_dtype=self.vision_dtype)
+
+    def _build_action_head(self, config: VCoTGraspConfig):
+        action_head_type = config.arch_config.action_head
+        if action_head_type == MLP_ACTION_HEAD_TYPE:
+            action_head = L1RegressionActionHead(
+                input_dim=config.hidden_size,
+                action_dim=action_with_binned_angle_seq_len,
+                **config.arch_config.mlp_action_head,
+            )
+            return action_head, action_with_binned_angle_seq_len
+        if action_head_type == DIFFUSION_ACTION_HEAD_TYPE:
+            action_head = DiffusionActionHead(**config.arch_config.diffusion_action_head)
+            return action_head, action_seq_len
+        if action_head_type in LM_ACTION_HEAD_TYPES:
+            return None, 0
+        raise NotImplementedError("Action head not implemented!")
 
     def set_trainable(self, *, image_encoder=False, image_projector=True, embeddings=True, lm=True, action_head=True, print_trainable=True):
         for param in self.image_encoder.parameters():
@@ -397,9 +440,9 @@ class VCoTGraspForConditionalGeneration(VCoTGraspPreTrainedModel, GenerationMixi
             action_hidden_states = last_hidden_states[action_tokens_mask].reshape(
                 -1, self.action_seq_len, self.config.text_config.hidden_size
             )  # [*, action_seq, hidden_size]
-            if self.action_head_type == "MLP":
+            if self.action_head_type == MLP_ACTION_HEAD_TYPE:
                 actions = self.action_head(action_hidden_states).reshape(-1, self.action_seq_len)
-            elif self.action_head_type == "Diffusion":
+            elif self.action_head_type == DIFFUSION_ACTION_HEAD_TYPE:
                 # only get action when testing
                 if not is_training:
                     actions = self.action_head.get_action(action_hidden_states).reshape(-1, self.action_seq_len)
@@ -407,7 +450,7 @@ class VCoTGraspForConditionalGeneration(VCoTGraspPreTrainedModel, GenerationMixi
         loss = 0
         loss_info = {}
         if labels is not None:
-            if self.config.arch_config.use_bbox or self.action_head_type in ["LM_pretrained", "LM_new"]:
+            if self.config.arch_config.use_bbox or self.action_head_type in LM_ACTION_HEAD_TYPES:
                 # Token loss for bbox prediction.
                 # Upcast to float if we need to compute the loss to avoid potential precision issues
                 logits = logits.float()
@@ -437,33 +480,34 @@ class VCoTGraspForConditionalGeneration(VCoTGraspPreTrainedModel, GenerationMixi
                 loss += token_loss
                 loss_info["token_loss"] = token_loss.detach()
 
-            if self.action_head_type == "MLP" and have_action:
+            if self.action_head_type == MLP_ACTION_HEAD_TYPE and have_action:
                 # Action loss
                 # position_loss_fct = nn.MSELoss()
                 position_loss_fct = nn.L1Loss()
                 angle_loss_fct = nn.CrossEntropyLoss()
-                angle_label_pos = 4
-                position, angle = actions[:, :angle_label_pos], actions[:, angle_label_pos:]
-                position_labels, angle_labels = grasp_labels[:, :angle_label_pos], grasp_labels[:, angle_label_pos]
+                grasp_position_dim = self.config.arch_config.grasp_position_dim
+                position, angle = actions[:, :grasp_position_dim], actions[:, grasp_position_dim:]
+                position_labels, angle_labels = grasp_labels[:, :grasp_position_dim], grasp_labels[:, grasp_position_dim]
                 angle_labels = angle_labels.long()
 
                 action_position_loss = position_loss_fct(position, position_labels)
                 action_angle_loss = angle_loss_fct(angle, angle_labels)
-                position_loss_scale = 1
-                angle_loss_scale = 1 / 10
                 # position_loss_scale = 10
                 # angle_loss_scale = 1 / 4
-                action_loss = position_loss_scale * action_position_loss + angle_loss_scale * action_angle_loss
+                action_loss = (
+                    self.config.arch_config.action_position_loss_scale * action_position_loss
+                    + self.config.arch_config.action_angle_loss_scale * action_angle_loss
+                )
 
                 loss += action_loss
                 loss_info["action_position_loss"] = action_position_loss.detach()
                 loss_info["action_angle_loss"] = action_angle_loss.detach()
 
-            elif self.action_head_type == "Diffusion" and have_action:
-                repeated_diffusion_steps = 8
-                grasp_labels_repeated = grasp_labels.unsqueeze(1).repeat(repeated_diffusion_steps, 1, 1)  # [B, 5] -> [B, 1, 5]
+            elif self.action_head_type == DIFFUSION_ACTION_HEAD_TYPE and have_action:
+                repeated_steps = self.config.arch_config.diffusion_repeated_steps
+                grasp_labels_repeated = grasp_labels.unsqueeze(1).repeat(repeated_steps, 1, 1)  # [B, 5] -> [B, 1, 5]
                 action_hidden_states = action_hidden_states.permute(0, 2, 1).mean(dim=1, keepdim=True)  # [B, 5, 2304] -> [B, 1, 5]
-                action_repeated = action_hidden_states.repeat(repeated_diffusion_steps, 1, 1)
+                action_repeated = action_hidden_states.repeat(repeated_steps, 1, 1)
                 action_loss = self.action_head.loss(grasp_labels_repeated, action_repeated)
                 loss += action_loss
                 loss_info["action_loss"] = action_loss.detach()

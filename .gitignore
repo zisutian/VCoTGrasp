@@ -1,5 +1,8 @@
 __pycache__
 .vscode
+.agents
+.codex
+
 
 data/grasp_anything/*.zip
 data/grasp_anything/lmdb/*

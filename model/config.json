@@ -1,14 +1,39 @@
 {
     "_vocab_size": 257154,
-    "_attn_implementation": "flash_attention_2",
+    "_attn_implementation": {
+      "text_config": "flash_attention_2",
+      "vision_config": "sdpa"
+    },
     "architectures": [
       "VCoTGraspForConditionalGeneration"
     ],
+    "arch_config": {
+      "model_type": "vcot_grasp_architecture",
+      "use_bbox": false,
+      "action_head": "None",
+      "lm_new_extra_token_count": 1024,
+      "token_embedding_pad_multiple": 8,
+      "mlp_action_head": {
+        "num_blocks": 1,
+        "hidden_dim": 256,
+        "output_dim": 1
+      },
+      "diffusion_action_head": {
+        "token_size": 5,
+        "model_type": "DiT-S",
+        "in_channels": 5,
+        "future_action_window_size": 0,
+        "past_action_window_size": 0
+      },
+      "grasp_position_dim": 4,
+      "action_position_loss_scale": 1.0,
+      "action_angle_loss_scale": 0.1,
+      "diffusion_repeated_steps": 8
+    },
     "bos_token_id": 2,
     "eos_token_id": 1,
     "image_token_index": 257152,
-    "model_type": "paligemma",
-    "num_hidden_layers": 26,
+    "model_type": "vcot_grasp",
     "pad_token_id": 0,
     "projection_dim": 2304,
     "text_config": {

@@ -1,17 +1,19 @@
+root = "../VCoT-Grasp-self"
+
 paligemma_model_id = "google/paligemma2-3b-mix-224"
-pretrained_paligemma_dir = "checkpoint/pretrained"
+pretrained_paligemma_dir = f"{root}/checkpoint/pretrained"
 
 action_seq_len = 5
 action_with_binned_angle_seq_len = 22
 angle_bins = 18
 
-split_root = "./data/grasp_anything/origin_split"
+split_root = f"{root}/data/grasp_anything/origin_split"
 grasp_anything_planar_grasp_train_csv_path = f"{split_root}/train.csv"
 grasp_anything_planar_grasp_test_seen_csv_path = f"{split_root}/test_seen.csv"
 grasp_anything_planar_grasp_test_unseen_csv_path = f"{split_root}/test_unseen.csv"
 
 
-grasp_dataset_root = "./data/grasp_anything/lmdb"
+grasp_dataset_root = f"{root}/data/grasp_anything/lmdb"
 grasp_anything_rgb_root = f"{grasp_dataset_root}/image"
 grasp_anything_mask_root = f"{grasp_dataset_root}/mask"
 grasp_anything_description_root = f"{grasp_dataset_root}/scene_description"

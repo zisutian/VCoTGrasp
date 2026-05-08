@@ -1,6 +1,6 @@
 
 python eval_cli.py \
-    --load-checkpoint-dir checkpoint/vcot \
+    --load-checkpoint-dir ../VCoT-Grasp-self/checkpoint/vcot \
     --test-split all \
     --use-bbox \
     --action-head MLP \

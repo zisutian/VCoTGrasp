@@ -21,11 +21,53 @@ class ArchConfig(PretrainedConfig):
         self,
         use_bbox=True,
         action_head="MLP",
+        lm_new_extra_token_count=1024,
+        token_embedding_pad_multiple=8,
+        mlp_action_head=None,
+        diffusion_action_head=None,
+        grasp_position_dim=4,
+        action_position_loss_scale=1.0,
+        action_angle_loss_scale=0.1,
+        diffusion_repeated_steps=8,
         **kwargs,
     ):
         self.use_bbox = use_bbox
         self.action_head = action_head
+        self.lm_new_extra_token_count = lm_new_extra_token_count
+        self.token_embedding_pad_multiple = token_embedding_pad_multiple
+        self.mlp_action_head = mlp_action_head or {
+            "num_blocks": 1,
+            "hidden_dim": 256,
+            "output_dim": 1,
+        }
+        self.diffusion_action_head = diffusion_action_head or {
+            "token_size": 5,
+            "model_type": "DiT-S",
+            "in_channels": 5,
+            "future_action_window_size": 0,
+            "past_action_window_size": 0,
+        }
+        self.grasp_position_dim = grasp_position_dim
+        self.action_position_loss_scale = action_position_loss_scale
+        self.action_angle_loss_scale = action_angle_loss_scale
+        self.diffusion_repeated_steps = diffusion_repeated_steps
         super().__init__(**kwargs)
+
+    def to_dict(self):
+        return {
+            "model_type": self.model_type,
+            "transformers_version": self.transformers_version,
+            "use_bbox": self.use_bbox,
+            "action_head": self.action_head,
+            "lm_new_extra_token_count": self.lm_new_extra_token_count,
+            "token_embedding_pad_multiple": self.token_embedding_pad_multiple,
+            "mlp_action_head": self.mlp_action_head,
+            "diffusion_action_head": self.diffusion_action_head,
+            "grasp_position_dim": self.grasp_position_dim,
+            "action_position_loss_scale": self.action_position_loss_scale,
+            "action_angle_loss_scale": self.action_angle_loss_scale,
+            "diffusion_repeated_steps": self.diffusion_repeated_steps,
+        }
 
 
 class VCoTGraspConfig(PretrainedConfig):
@@ -79,6 +121,13 @@ class VCoTGraspConfig(PretrainedConfig):
 
     model_type = "vcot_grasp"
     sub_configs = {"text_config": AutoConfig, "vision_config": AutoConfig, "arch_config": ArchConfig}
+
+    @staticmethod
+    def build_attn_implementation(text_config="sdpa", vision_config="sdpa"):
+        return {
+            "text_config": text_config,
+            "vision_config": vision_config,
+        }
 
     def __init__(
         self,
@@ -135,11 +184,18 @@ class VCoTGraspConfig(PretrainedConfig):
         self.vision_config.projection_dim = projection_dim
 
         if isinstance(arch_config, dict):
-            self.arch_config = ArchConfig(arch_config["use_bbox"], arch_config["action_head"])
+            self.arch_config = ArchConfig(**arch_config)
         elif arch_config is None:
             self.arch_config = ArchConfig(False, "None")
 
         super().__init__(**kwargs)
+
+    def set_attn_implementation(self, text_config="sdpa", vision_config="sdpa"):
+        self._attn_implementation = self.build_attn_implementation(
+            text_config=text_config,
+            vision_config=vision_config,
+        )
+        return self
 
     @property
     def ignore_index(self):

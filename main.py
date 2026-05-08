@@ -1,5 +1,6 @@
 import os
 import argparse
+import json
 
 import torch
 from torch import optim
@@ -12,6 +13,28 @@ from model import ArchConfig, VCoTGraspConfig, VCoTGraspForConditionalGeneration
 from data import get_dataloaders
 
 
+DEFAULT_TRAIN_CONFIG_PATH = "train_configs/grasp_anything_mlp.json"
+
+
+def load_train_config(config_path):
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    config["train_config_path"] = config_path
+    return argparse.Namespace(**config)
+
+
+def get_torch_dtype(dtype_name):
+    if isinstance(dtype_name, torch.dtype):
+        return dtype_name
+    return getattr(torch, dtype_name)
+
+
+def save_checkpoint_with_train_config(model, save_dir, train_args):
+    model.save_pretrained(save_dir)
+    with open(os.path.join(save_dir, "train_config.json"), "w", encoding="utf-8") as f:
+        json.dump(vars(train_args), f, indent=2)
+
+
 def main(args):
     set_seed(args.seed)
     accelerator = Accelerator(log_with="tensorboard", project_dir=args.tensorboard_root)
@@ -22,16 +45,24 @@ def main(args):
     }
     hyper_params.update(**accelerate_hyper_params)
 
-    arch_config = ArchConfig(args.use_bbox, args.action_head)
+    train_torch_dtype = get_torch_dtype(args.torch_dtype)
+
+    # Runtime architecture choices come from the train config; backbone defaults come from model/config.json.
+    runtime_arch_config = ArchConfig(args.use_bbox, args.action_head)
     if not args.load_checkpoint_dir:
         # init a model
-        config = VCoTGraspConfig.from_json_file("model/config.json")
-        config.arch_config = arch_config
-        model = VCoTGraspForConditionalGeneration(config)
-        processor = VCoTGraspProcessor(arch_config)
+        model_config = VCoTGraspConfig.from_json_file(args.model_config_path)
+        model_config.arch_config = runtime_arch_config
+        model_config.set_attn_implementation(**args.attn_implementation)
+        model = VCoTGraspForConditionalGeneration(model_config)
+        processor = VCoTGraspProcessor(runtime_arch_config)
     else:
-        model = VCoTGraspForConditionalGeneration.from_pretrained(args.load_checkpoint_dir).to(torch.bfloat16)
-        processor = VCoTGraspProcessor(arch_config)
+        model = VCoTGraspForConditionalGeneration.from_pretrained(
+            args.load_checkpoint_dir,
+            torch_dtype=train_torch_dtype,
+            attn_implementation=args.attn_implementation,
+        )
+        processor = VCoTGraspProcessor(runtime_arch_config)
 
     model.set_trainable(
         image_encoder=args.train_image_encoder,
@@ -41,7 +72,7 @@ def main(args):
         action_head=True,
     )
     train_dataloader, eval_dataloader, _ = get_dataloaders(
-        arch_config,
+        runtime_arch_config,
         args.train_dataset,
         processor,
         args.train_batch_size_per_gpu,
@@ -110,12 +141,12 @@ def main(args):
                     version_dir = os.path.join(save_dir, f"epoch{epoch}_step{global_step}")
                     if accelerator.is_main_process:
                         unwrapped_model = accelerator.unwrap_model(model)
-                        unwrapped_model.save_pretrained(version_dir)
+                        save_checkpoint_with_train_config(unwrapped_model, version_dir, args)
 
     version_dir = os.path.join(save_dir, f"epoch{epoch}_step{global_step}")
     if accelerator.is_main_process:
         unwrapped_model = accelerator.unwrap_model(model)
-        unwrapped_model.save_pretrained(version_dir)
+        save_checkpoint_with_train_config(unwrapped_model, version_dir, args)
 
     accelerator.print("Training end")
     accelerator.end_training()
@@ -124,38 +155,8 @@ def main(args):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
+    parser.add_argument("--train-config", type=str, default=DEFAULT_TRAIN_CONFIG_PATH, help="training config json path")
 
-    parser.add_argument("--load-checkpoint-dir", type=str, default="", help="finished checkpoint dir")
-    parser.add_argument("--save-root", type=str, default="./checkpoint", help="save directory")
-    parser.add_argument("--tensorboard-root", type=str, default="./checkpoint/tensorboard", help="tensorboard directory")
-    parser.add_argument("--run-name", type=str, default="run", help="name of this training phase")
-
-    # architecture choice
-    parser.add_argument("--use-bbox", action="store_true")
-    parser.add_argument("--action-head", type=str, help="MLP, Diffusion, LM_pretrained, LM_new")
-
-    # to freeze or train model parts, default freeze
-    parser.add_argument("--train-image-encoder", action="store_true")
-    parser.add_argument("--train-image-projector", action="store_true")
-    parser.add_argument("--train-embeddings", action="store_true", help="freeze or train lm's input and output embeddings")
-    parser.add_argument("--train-lm", action="store_true", help="freeze or train lm decoders")
-
-    # training parameters
-    parser.add_argument("--train-dataset", type=str, help="train dataset")
-    parser.add_argument("--train-epoch", type=int, help="train epoch, not incremental")
-    parser.add_argument("--train-batch-size-per-gpu", type=int, help="train batch size")
-    parser.add_argument("--eval-batch-size-per-gpu", type=int, help="eval batch size")
-    parser.add_argument("--lr", type=float, help="learning rate")
-    parser.add_argument("--lr-scheduler", type=str, default="cosine_schedule_with_warmup")
-    parser.add_argument("--warmup-ratio", type=float, default=0.03, help="ratio of warmup steps and training steps")
-    parser.add_argument("--weight-decay", type=float, default=0, help="weight decay")
-    parser.add_argument("--eval-every-n-steps", type=int, help="evaluate every n steps")
-    parser.add_argument("--save-every-n-steps", type=int, help="save every n steps")
-    parser.add_argument("--data-ratio", type=float, default=1.0, help="data used for training")
-    parser.add_argument("--bbox-ratio", type=float, default=1.0, help="bbox used for training")
-
-    parser.add_argument("--seed", type=int, default=42, help="only positive value enables a fixed seed")
-
-    args = parser.parse_args()
-
+    cli_args = parser.parse_args()
+    args = load_train_config(cli_args.train_config)
     main(args)

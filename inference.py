@@ -6,6 +6,10 @@ from model import VCoTGraspForConditionalGeneration, VCoTGraspProcessor, ArchCon
 from data import *
 
 
+MODEL_CONFIG_PATH = "model/config.json"
+INFERENCE_TORCH_DTYPE = torch.bfloat16
+
+
 class VCoTGraspInferencer:
     def __init__(
         self,
@@ -16,18 +20,21 @@ class VCoTGraspInferencer:
         device="cuda",
         use_lora=False,
     ):
+        runtime_arch_config = ArchConfig(use_bbox=use_bbox, action_head=action_head)
         if not use_lora:
-            self.model = VCoTGraspForConditionalGeneration.from_pretrained(checkpoint_dir, torch_dtype=torch.bfloat16).to(device)
+            self.model = VCoTGraspForConditionalGeneration.from_pretrained(
+                checkpoint_dir,
+                torch_dtype=INFERENCE_TORCH_DTYPE,
+            ).to(device)
         else:
-            config = VCoTGraspConfig.from_json_file("model/config.json")
-            config.arch_config = ArchConfig(use_bbox=use_bbox, action_head=action_head)
+            model_config = VCoTGraspConfig.from_json_file(MODEL_CONFIG_PATH)
+            model_config.arch_config = runtime_arch_config
             # disable flash attention on v100
-            config._attn_implementation = "sdpa"
-            model = VCoTGraspForConditionalGeneration(config)
+            model_config.set_attn_implementation(text_config="sdpa", vision_config="sdpa")
+            model = VCoTGraspForConditionalGeneration(model_config)
             model = PeftModel.from_pretrained(model, checkpoint_dir)
-            self.model = model.to(torch.bfloat16).to(device)
-        arch_config = ArchConfig(use_bbox=use_bbox, action_head=action_head)
-        self.processor = VCoTGraspProcessor(arch_config)
+            self.model = model.to(INFERENCE_TORCH_DTYPE).to(device)
+        self.processor = VCoTGraspProcessor(runtime_arch_config)
         self.device = device
 
         self.use_bbox = use_bbox
