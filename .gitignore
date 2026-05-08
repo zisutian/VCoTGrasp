@@ -1,4 +1,5 @@
 __pycache__
+.vscode
 
 data/grasp_anything/*.zip
 data/grasp_anything/lmdb/*
@@ -6,6 +7,7 @@ checkpoint/pretrained/.locks/*
 checkpoint/pretrained/models--google--paligemma2-3b-mix-224/*
 checkpoint/vcot/*
 
-checkpoints/
+checkpoints
+results
 
 
