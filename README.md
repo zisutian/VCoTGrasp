@@ -9,3 +9,7 @@ checkpoints文件夹存放训练时的模型检查点
 Flash Attention 2.0 only supports torch.float16 and torch.bfloat16 dtypes,
 but the current dtype in Gemma2ForCausalLM is torch.float32.
 已解决
+
+TODO:
+解决载入模型和eval的冲突,争取直接使用checkpoint进行eval
+考虑模型保存问题

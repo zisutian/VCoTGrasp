@@ -1,6 +1,7 @@
 import os
 import argparse
 import json
+import shutil
 
 import torch
 from torch import optim
@@ -30,6 +31,8 @@ def get_torch_dtype(dtype_name):
 
 
 def save_checkpoint_with_train_config(model, save_dir, train_args):
+    if getattr(train_args, "overwrite_checkpoints", False) and os.path.isdir(save_dir):
+        shutil.rmtree(save_dir)
     model.save_pretrained(save_dir)
     with open(os.path.join(save_dir, "train_config.json"), "w", encoding="utf-8") as f:
         json.dump(vars(train_args), f, indent=2)
@@ -137,16 +140,16 @@ def main(args):
                     accelerator.print(f"epoch: {epoch}, global_step: {global_step}, eval_loss: {eval_loss.item()}")
                     model.train()
 
-                if global_step % args.save_every_n_steps == 0:
-                    version_dir = os.path.join(save_dir, f"epoch{epoch}_step{global_step}")
+                if args.save_every_n_steps > 0 and global_step % args.save_every_n_steps == 0:
+                    version_dir = os.path.join(save_dir, f"epoch{epoch}_step{global_step}_latest")
                     if accelerator.is_main_process:
                         unwrapped_model = accelerator.unwrap_model(model)
                         save_checkpoint_with_train_config(unwrapped_model, version_dir, args)
 
-    version_dir = os.path.join(save_dir, f"epoch{epoch}_step{global_step}")
-    if accelerator.is_main_process:
-        unwrapped_model = accelerator.unwrap_model(model)
-        save_checkpoint_with_train_config(unwrapped_model, version_dir, args)
+        version_dir = os.path.join(save_dir, f"epoch{epoch}_step{global_step}_final")
+        if accelerator.is_main_process:
+            unwrapped_model = accelerator.unwrap_model(model)
+            save_checkpoint_with_train_config(unwrapped_model, version_dir, args)
 
     accelerator.print("Training end")
     accelerator.end_training()
