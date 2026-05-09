@@ -16,6 +16,8 @@ train存放训练参数和训练脚本.
 
 eval存放评估脚本.
 
+visualization存放TensorBoard指标导出与可视化脚本.
+
 ## Checkpoint配置规则
 
 checkpoint/config.json是模型结构的唯一来源.
