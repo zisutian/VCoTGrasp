@@ -18,6 +18,30 @@ eval存放评估脚本.
 
 visualization存放TensorBoard指标导出与可视化脚本.
 
+## 环境
+
+当前环境的pip依赖已冻结在requirements.txt.
+
+当前环境信息:
+- Ubuntu 22.04.5 LTS
+- Linux kernel 6.8.0-40-generic
+- Python 3.9.25
+- PyTorch 2.2.0+cu121
+- PyTorch CUDA runtime 12.1
+- NVIDIA Driver 580.126.09
+- NVIDIA-SMI CUDA Version 13.0
+- GPU: NVIDIA A100-SXM4-80GB
+
+注意: NVIDIA-SMI显示的是驱动支持的CUDA版本,当前PyTorch实际使用的是cu121.
+
+FlashAttention不直接写入requirements.txt,需要根据CUDA,torch和Python版本单独安装对应wheel.
+原始VCoT-Grasp仓库推荐使用v2.7.4.post1,例如CUDA 12,torch 2.2,Python 3.9环境:
+
+```bash
+wget https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.2cxx11abiFALSE-cp39-cp39-linux_x86_64.whl
+pip install flash_attn-2.7.4.post1+cu12torch2.2cxx11abiFALSE-cp39-cp39-linux_x86_64.whl
+```
+
 ## Checkpoint配置规则
 
 checkpoint/config.json是模型结构的唯一来源.
@@ -91,6 +115,18 @@ eval_cli.py的模型架构信息只从checkpoint/config.json读取.
 - train json中的attn_implementation只控制训练时传给Transformers的attention实现.
 - 推理/评估已有checkpoint时,可以通过from_pretrained(torch_dtype=bfloat16)满足FA2的dtype要求.
 
-## TODO
 
-- 考虑可视化问题.
+## 原项目引用
+
+本项目基于原始项目[VCoT-Grasp](https://github.com/zhanghr2001/VCoT-Grasp)修改.
+
+如果使用本项目,请同时引用原论文:
+
+```bibtex
+@article{zhang2025vcot,
+  title={VCoT-Grasp: Grasp Foundation Models with Visual Chain-of-Thought Reasoning for Language-driven Grasp Generation},
+  author={Zhang, Haoran and Bai, Shuanghao and Zhou, Wanqi and Zhang, Yuedi and Zhang, Qi and Ding, Pengxiang and Chi, Cheng and Wang, Donglin and Chen, Badong},
+  journal={arXiv preprint arXiv:2510.05827},
+  year={2025}
+}
+```
