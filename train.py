@@ -16,7 +16,7 @@ from model import VCoTGraspConfig, VCoTGraspForConditionalGeneration, VCoTGraspP
 from data import get_dataloaders
 
 
-DEFAULT_TRAIN_CONFIG_PATH = "train_configs/grasp_anything_mlp.json"
+DEFAULT_TRAIN_CONFIG_PATH = "train/grasp_anything_mlp.json"
 TRAIN_CONFIG_NAME = "train_config.json"
 CHECKPOINT_TRAIN_CONFIG_EXCLUDE_KEYS = {
     "load_checkpoint_dir",
@@ -26,6 +26,7 @@ CHECKPOINT_TRAIN_CONFIG_EXCLUDE_KEYS = {
     "train_config_path",
     "run_name",
     "overwrite_checkpoints",
+    "torch_dtype",
     "use_bbox",
     "action_head",
 }
@@ -81,12 +82,6 @@ def apply_checkpoint_train_config(args):
     return argparse.Namespace(**current_config)
 
 
-def get_torch_dtype(dtype_name):
-    if isinstance(dtype_name, torch.dtype):
-        return dtype_name
-    return getattr(torch, dtype_name)
-
-
 def warn_if_train_config_arch_conflicts(args, arch_config, source):
     conflicts = []
     for key in ("use_bbox", "action_head"):
@@ -128,8 +123,6 @@ def main(args):
     set_seed(args.seed)
     accelerator = Accelerator(log_with="tensorboard", project_dir=args.tensorboard_root)
 
-    train_torch_dtype = get_torch_dtype(args.torch_dtype)
-
     if not args.load_checkpoint_dir:
         # init a model
         model_config = VCoTGraspConfig.from_json_file(args.model_config_path)
@@ -142,7 +135,6 @@ def main(args):
     else:
         model = VCoTGraspForConditionalGeneration.from_pretrained(
             args.load_checkpoint_dir,
-            torch_dtype=train_torch_dtype,
             attn_implementation=args.attn_implementation,
         )
         warn_if_train_config_arch_conflicts(args, model.config.arch_config, "checkpoint config")

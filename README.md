@@ -45,6 +45,7 @@ checkpoint/train_config.json只保存训练过程参数,例如:
 - train_config_path
 - run_name
 - overwrite_checkpoints
+- torch_dtype
 
 ## 训练
 
@@ -78,10 +79,15 @@ eval_cli.py的模型架构信息只从checkpoint/config.json读取.
 
 ## 已知问题
 
-Flash Attention 2.0 only supports torch.float16 and torch.bfloat16 dtypes,
-but the current dtype in Gemma2ForCausalLM is torch.float32.
+1. warning:Gemma2ForCausalLM是torch.float32类型导致FA2不支持
 
-已解决.
+查看原始代码后,旧版config中虽然包含torch_dtype=bfloat16,但from_config从零初始化出的参数实际仍为float32.
+训练时的bf16由Accelerate配置控制,保存后的checkpoint权重可以是bfloat16.
+
+因此当前约定:
+- 从零训练默认使用SDPA,不为了启用FA2改变初始化dtype.
+- train json中的attn_implementation只控制训练时传给Transformers的attention实现.
+- 推理/评估已有checkpoint时,可以通过from_pretrained(torch_dtype=bfloat16)满足FA2的dtype要求.
 
 ## TODO
 

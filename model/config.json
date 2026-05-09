@@ -1,7 +1,7 @@
 {
     "_vocab_size": 257154,
     "_attn_implementation": {
-      "text_config": "flash_attention_2",
+      "text_config": "sdpa",
       "vision_config": "sdpa"
     },
     "architectures": [
@@ -58,10 +58,8 @@
       "num_key_value_heads": 4,
       "query_pre_attn_scalar": 256,
       "sliding_window": 4096,
-      "torch_dtype": "bfloat16",
       "vocab_size": 257216
     },
-    "torch_dtype": "bfloat16",
     "transformers_version": "4.47.0.dev0",
     "vision_config": {
       "hidden_size": 1152,
@@ -73,7 +71,6 @@
       "num_positions": 256,
       "patch_size": 14,
       "projection_dim": 2304,
-      "torch_dtype": "bfloat16",
       "vision_use_head": false
     },
     "dummy_action_token_index": 257153

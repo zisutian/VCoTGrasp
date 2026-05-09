@@ -1,8 +1,7 @@
 {
   "model_config_path": "model/config.json",
-  "torch_dtype": "bfloat16",
   "attn_implementation": {
-    "text_config": "flash_attention_2",
+    "text_config": "sdpa",
     "vision_config": "sdpa"
   },
   "load_checkpoint_dir": "",

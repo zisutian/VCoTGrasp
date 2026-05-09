@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from contextlib import contextmanager
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -27,8 +26,6 @@ if is_flash_attn_2_available():
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
 
 logger = logging.get_logger(__name__)
-
-DEFAULT_TORCH_DTYPE = torch.bfloat16
 
 MLP_ACTION_HEAD_TYPE = "MLP"
 DIFFUSION_ACTION_HEAD_TYPE = "Diffusion"
@@ -103,30 +100,10 @@ class VCoTGraspPreTrainedModel(PreTrainedModel):
     _supports_flash_attn_2 = True
     _supports_sdpa = True
 
-    @staticmethod
-    def _get_torch_dtype(config, fallback=DEFAULT_TORCH_DTYPE):
-        torch_dtype = getattr(config, "torch_dtype", None)
-        if isinstance(torch_dtype, torch.dtype):
-            return torch_dtype
-        if isinstance(torch_dtype, str):
-            return getattr(torch, torch_dtype)
-        return fallback
-
-    @staticmethod
-    @contextmanager
-    def _temporary_default_torch_dtype(torch_dtype):
-        old_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(torch_dtype)
-        try:
-            yield
-        finally:
-            torch.set_default_dtype(old_dtype)
-
     def init_weights(self):
         paligemma = PaliGemmaForConditionalGeneration.from_pretrained(
             paligemma_model_id,
             cache_dir=pretrained_paligemma_dir,
-            torch_dtype=self._get_torch_dtype(self.config),
         )
         paligemma.language_model.resize_token_embeddings(self.vocab_size)
 
@@ -167,15 +144,13 @@ class VCoTGraspPreTrainedModel(PreTrainedModel):
 class VCoTGraspForConditionalGeneration(VCoTGraspPreTrainedModel, GenerationMixin):
     def __init__(self, config: VCoTGraspConfig):
         super().__init__(config)
-        self.model_dtype, self.text_dtype, self.vision_dtype = self._resolve_torch_dtypes(config)
 
-        with self._temporary_default_torch_dtype(self.model_dtype):
-            self.language_model = self._build_language_model(config)
-            self.image_encoder = self._build_image_encoder(config)
-            self.image_projector = VCoTGraspImageProjector(config)
+        self.language_model = self._build_language_model(config)
+        self.image_encoder = self._build_image_encoder(config)
+        self.image_projector = VCoTGraspImageProjector(config)
 
-            self.action_head_type = config.arch_config.action_head
-            self.action_head, self.action_seq_len = self._build_action_head(config)
+        self.action_head_type = config.arch_config.action_head
+        self.action_head, self.action_seq_len = self._build_action_head(config)
 
         self.vocab_size = self.config.text_config.vocab_size
         self.pad_token_id = self.config.pad_token_id
@@ -184,20 +159,14 @@ class VCoTGraspForConditionalGeneration(VCoTGraspPreTrainedModel, GenerationMixi
 
         self.post_init()
 
-    def _resolve_torch_dtypes(self, config: VCoTGraspConfig):
-        model_dtype = self._get_torch_dtype(config)
-        text_dtype = self._get_torch_dtype(config.text_config, fallback=model_dtype)
-        vision_dtype = self._get_torch_dtype(config.vision_config, fallback=model_dtype)
-        return model_dtype, text_dtype, vision_dtype
-
     def _build_language_model(self, config: VCoTGraspConfig):
-        language_model = AutoModelForCausalLM.from_config(config.text_config, torch_dtype=self.text_dtype)
+        language_model = AutoModelForCausalLM.from_config(config.text_config)
         if language_model._tied_weights_keys is not None:
             self._tied_weights_keys = [f"language_model.{k}" for k in language_model._tied_weights_keys]
         return language_model
 
     def _build_image_encoder(self, config: VCoTGraspConfig):
-        return AutoModel.from_config(config.vision_config, torch_dtype=self.vision_dtype)
+        return AutoModel.from_config(config.vision_config)
 
     def _build_action_head(self, config: VCoTGraspConfig):
         action_head_type = config.arch_config.action_head
