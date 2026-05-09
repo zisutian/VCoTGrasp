@@ -1,50 +1,111 @@
-import os
 import argparse
+import io
+import json
+import os
 
 import numpy as np
 import torch
-from PIL import Image, ImageDraw
+from PIL import ImageDraw
 from tqdm import tqdm
 
-from model import VCoTGraspConfig, VCoTGraspForConditionalGeneration, VCoTGraspProcessor
 import data
 from constants import *
 from inference import VCoTGraspInferencer, eval_grasp_all_labels
-import io
 
 
-def eval(load_checkpoint_dir, test_split, use_bbox, action_head, device, visualize_dir, result_dir, use_lora=False):
-    inferencer = VCoTGraspInferencer(
-        load_checkpoint_dir,
-        use_bbox=use_bbox,
-        action_head=action_head,
-        device=device,
-        use_lora=use_lora,
+TRAIN_CONFIG_NAME = "train_config.json"
+MODEL_CONFIG_NAME = "config.json"
+
+
+def load_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_checkpoint_eval_config(checkpoint_dir):
+    train_config_path = os.path.join(checkpoint_dir, TRAIN_CONFIG_NAME)
+    if os.path.isfile(train_config_path):
+        train_config = load_json(train_config_path)
+        return {
+            "use_bbox": train_config.get("use_bbox"),
+            "action_head": train_config.get("action_head"),
+            "model_config_path": train_config.get("model_config_path"),
+            "source": train_config_path,
+        }
+
+    model_config_path = os.path.join(checkpoint_dir, MODEL_CONFIG_NAME)
+    if os.path.isfile(model_config_path):
+        model_config = load_json(model_config_path)
+        arch_config = model_config.get("arch_config", {})
+        return {
+            "use_bbox": arch_config.get("use_bbox"),
+            "action_head": arch_config.get("action_head"),
+            "model_config_path": model_config_path,
+            "source": model_config_path,
+        }
+
+    raise FileNotFoundError(
+        f"Cannot find {TRAIN_CONFIG_NAME} or {MODEL_CONFIG_NAME} in checkpoint dir: {checkpoint_dir}"
     )
 
+
+def resolve_eval_config(args):
+    checkpoint_config = load_checkpoint_eval_config(args.load_checkpoint_dir)
+    use_bbox = checkpoint_config["use_bbox"] if args.use_bbox is None else args.use_bbox
+    action_head = checkpoint_config["action_head"] if args.action_head is None else args.action_head
+    model_config_path = args.model_config_path or checkpoint_config["model_config_path"]
+
+    if use_bbox is None:
+        raise ValueError("use_bbox is missing. Add it to train_config.json/config.json or pass --use-bbox/--no-use-bbox.")
+    if not action_head:
+        raise ValueError("action_head is missing. Add it to train_config.json/config.json or pass --action-head.")
+
+    return argparse.Namespace(
+        load_checkpoint_dir=args.load_checkpoint_dir,
+        test_split=args.test_split,
+        use_bbox=use_bbox,
+        action_head=action_head,
+        device=args.device,
+        visualize_dir=args.visualize_dir,
+        result_dir=args.result_dir,
+        use_lora=args.use_lora,
+        model_config_path=model_config_path,
+        config_source=checkpoint_config["source"],
+        save_image_range=args.save_image_range,
+        iou_threshold=args.iou_threshold,
+        angle_threshold=args.angle_threshold,
+    )
+
+
+def get_split_csv_path(test_split):
     if test_split == "seen":
-        csv_path = grasp_anything_planar_grasp_test_seen_csv_path
-        visualize_dir = os.path.join(visualize_dir, "seen")
-    elif test_split == "unseen":
-        csv_path = grasp_anything_planar_grasp_test_unseen_csv_path
-        visualize_dir = os.path.join(visualize_dir, "unseen")
-    else:
-        raise ValueError
+        return grasp_anything_planar_grasp_test_seen_csv_path
+    if test_split == "unseen":
+        return grasp_anything_planar_grasp_test_unseen_csv_path
+    raise ValueError(f"Invalid test split: {test_split}")
+
+
+def eval_split(args, test_split):
+    inferencer = VCoTGraspInferencer(
+        args.load_checkpoint_dir,
+        use_bbox=args.use_bbox,
+        action_head=args.action_head,
+        device=args.device,
+        use_lora=args.use_lora,
+        model_config_path=args.model_config_path,
+    )
+
+    visualize_dir = os.path.join(args.visualize_dir, test_split)
     os.makedirs(visualize_dir, exist_ok=True)
 
     ds = data.GraspAnythingForGraspGeneration(
-        csv_path,
+        get_split_csv_path(test_split),
         grasp_anything_rgb_root,
         grasp_anything_planar_grasp_root,
         grasp_anything_mask_root,
-        use_bbox=use_bbox,
-        action_head_type=action_head,
+        use_bbox=args.use_bbox,
+        action_head_type=args.action_head,
     )
-
-    image_size = 416
-    save_image_range = 100
-    IOU_THRESHOLD = 0.25
-    ANGLE_THRESHOLD = 30
 
     n_success = 0
     n_valid = 0
@@ -53,30 +114,24 @@ def eval(load_checkpoint_dir, test_split, use_bbox, action_head, device, visuali
         image, prompt, _, _, obj_name, _ = ds[i]
         grasp_id, _, _ = ds.data.iloc[i]
 
-
-        # mask = np.load(os.path.join(ds.mask_root, grasp_id + ".npy"))
-        # bbox_gt = data.mask_to_bbox_position(mask)
-        # grasp_gts = torch.load(os.path.join(ds.grasp_root, grasp_id + ".pt"))
-        # grasp_gts = grasp_gts[:, 1:].tolist()
         mask_bytes = data._get_lmdb_bytes(ds.env_mask, f"{grasp_id}.npy")
         mask = np.load(io.BytesIO(mask_bytes))
         bbox_gt = data.mask_to_bbox_position(mask)
 
         grasp_bytes = data._get_lmdb_bytes(ds.env_grasp, f"{grasp_id}.pt")
-        grasp_gts_tensor = torch.load(io.BytesIO(grasp_bytes), map_location='cpu', weights_only=False)
-        grasp_gts_list = grasp_gts_tensor[:, 1:].tolist()   
+        grasp_gts_tensor = torch.load(io.BytesIO(grasp_bytes), map_location="cpu", weights_only=False)
+        grasp_gts_list = grasp_gts_tensor[:, 1:].tolist()
 
         grasp_pred, bbox_pred = inferencer.generate_postprocess(image, prompt, obj_name)
-
-        if grasp_pred is None or (use_bbox and bbox_pred is None):
+        if grasp_pred is None or (args.use_bbox and bbox_pred is None):
             continue
 
-        success = eval_grasp_all_labels(grasp_pred, grasp_gts_list, IOU_THRESHOLD, ANGLE_THRESHOLD)
+        success = eval_grasp_all_labels(grasp_pred, grasp_gts_list, args.iou_threshold, args.angle_threshold)
         n_success += int(success)
         n_valid += 1
 
-        if i < save_image_range:
-            if use_bbox:
+        if i < args.save_image_range:
+            if args.use_bbox:
                 draw = ImageDraw.Draw(image)
                 draw.rectangle(bbox_pred, outline="yellow", width=3)
                 draw.rectangle(bbox_gt, outline="blue", width=3)
@@ -87,39 +142,49 @@ def eval(load_checkpoint_dir, test_split, use_bbox, action_head, device, visuali
             image.save(save_path)
 
     res = (
-        f"checkpoint: {load_checkpoint_dir}\n"
+        f"checkpoint: {args.load_checkpoint_dir}\n"
+        f"config source: {args.config_source}\n"
         f"test split: {test_split}\n"
+        f"use bbox: {args.use_bbox}\n"
+        f"action head: {args.action_head}\n"
         f"num success: {n_success}, num valid: {n_valid}, num all: {n_all}\n"
         f"success rate: {n_success / n_all * 100} %\n"
     )
 
-    os.makedirs(result_dir, exist_ok=True)
-    result_path = os.path.join(result_dir, f"{test_split}.txt")
+    os.makedirs(args.result_dir, exist_ok=True)
+    result_path = os.path.join(args.result_dir, f"{test_split}.txt")
     with open(result_path, "w", encoding="utf-8") as file:
         file.write(res)
 
 
-if __name__ == "__main__":
-
+def main():
     parser = argparse.ArgumentParser()
-
-    parser.add_argument("--load-checkpoint-dir", type=str, help="finished checkpoint dir")
-    parser.add_argument("--test-split", type=str, help="all, seen, unseen")
-
-    # architecture choice
-    parser.add_argument("--use-bbox", action="store_true")
-    parser.add_argument("--action-head", type=str, help="MLP, Diffusion, LM_pretrained, LM_new")
-
+    parser.add_argument("--load-checkpoint-dir", type=str, required=True, help="finished checkpoint dir")
+    parser.add_argument("--test-split", type=str, default="all", choices=["all", "seen", "unseen"])
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--visualize-dir", type=str)
-    parser.add_argument("--result-dir", type=str)
-
+    parser.add_argument("--visualize-dir", type=str, default="results/visualize/")
+    parser.add_argument("--result-dir", type=str, default="results/")
     parser.add_argument("--use-lora", action="store_true")
 
-    args = parser.parse_args()
+    parser.add_argument("--use-bbox", dest="use_bbox", action="store_true", default=None)
+    parser.add_argument("--no-use-bbox", dest="use_bbox", action="store_false")
+    parser.add_argument("--action-head", type=str, choices=["MLP", "Diffusion", "LM_pretrained", "LM_new"])
+    parser.add_argument("--model-config-path", type=str)
+
+    parser.add_argument("--save-image-range", type=int, default=100)
+    parser.add_argument("--iou-threshold", type=float, default=0.25)
+    parser.add_argument("--angle-threshold", type=float, default=30)
+
+    args = resolve_eval_config(parser.parse_args())
+    print(f"Loaded eval config from {args.config_source}")
+    print(f"use_bbox={args.use_bbox}, action_head={args.action_head}")
 
     if args.test_split == "all":
-        eval(args.load_checkpoint_dir, "seen", args.use_bbox, args.action_head, args.device, args.visualize_dir, args.result_dir, args.use_lora)
-        eval(args.load_checkpoint_dir, "unseen", args.use_bbox, args.action_head, args.device, args.visualize_dir, args.result_dir, args.use_lora)
+        eval_split(args, "seen")
+        eval_split(args, "unseen")
     else:
-        eval(args.load_checkpoint_dir, args.test_split, args.use_bbox, args.action_head, args.device, args.visualize_dir, args.result_dir, args.use_lora)
+        eval_split(args, args.test_split)
+
+
+if __name__ == "__main__":
+    main()

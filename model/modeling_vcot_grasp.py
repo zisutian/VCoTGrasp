@@ -114,7 +114,7 @@ class VCoTGraspPreTrainedModel(PreTrainedModel):
 
     @staticmethod
     @contextmanager
-    def _set_default_torch_dtype(torch_dtype):
+    def _temporary_default_torch_dtype(torch_dtype):
         old_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch_dtype)
         try:
@@ -169,7 +169,7 @@ class VCoTGraspForConditionalGeneration(VCoTGraspPreTrainedModel, GenerationMixi
         super().__init__(config)
         self.model_dtype, self.text_dtype, self.vision_dtype = self._resolve_torch_dtypes(config)
 
-        with self._set_default_torch_dtype(self.model_dtype):
+        with self._temporary_default_torch_dtype(self.model_dtype):
             self.language_model = self._build_language_model(config)
             self.image_encoder = self._build_image_encoder(config)
             self.image_projector = VCoTGraspImageProjector(config)

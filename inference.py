@@ -19,6 +19,7 @@ class VCoTGraspInferencer:
         input_image_size=416,
         device="cuda",
         use_lora=False,
+        model_config_path=MODEL_CONFIG_PATH,
     ):
         runtime_arch_config = ArchConfig(use_bbox=use_bbox, action_head=action_head)
         if not use_lora:
@@ -27,7 +28,7 @@ class VCoTGraspInferencer:
                 torch_dtype=INFERENCE_TORCH_DTYPE,
             ).to(device)
         else:
-            model_config = VCoTGraspConfig.from_json_file(MODEL_CONFIG_PATH)
+            model_config = VCoTGraspConfig.from_json_file(model_config_path)
             model_config.arch_config = runtime_arch_config
             # disable flash attention on v100
             model_config.set_attn_implementation(text_config="sdpa", vision_config="sdpa")
