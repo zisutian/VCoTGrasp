@@ -2,6 +2,7 @@ import os
 import argparse
 import json
 import shutil
+import glob
 
 import torch
 from torch import optim
@@ -30,9 +31,14 @@ def get_torch_dtype(dtype_name):
     return getattr(torch, dtype_name)
 
 
-def save_checkpoint_with_train_config(model, save_dir, train_args):
-    if getattr(train_args, "overwrite_checkpoints", False) and os.path.isdir(save_dir):
-        shutil.rmtree(save_dir)
+def save_checkpoint_with_train_config(model, save_dir, train_args, overwrite_pattern=None):
+    if getattr(train_args, "overwrite_checkpoints", False):
+        if overwrite_pattern is not None:
+            for old_dir in glob.glob(os.path.join(os.path.dirname(save_dir), overwrite_pattern)):
+                if os.path.isdir(old_dir):
+                    shutil.rmtree(old_dir)
+        elif os.path.isdir(save_dir):
+            shutil.rmtree(save_dir)
     model.save_pretrained(save_dir)
     with open(os.path.join(save_dir, "train_config.json"), "w", encoding="utf-8") as f:
         json.dump(vars(train_args), f, indent=2)
@@ -144,12 +150,21 @@ def main(args):
                     version_dir = os.path.join(save_dir, f"epoch{epoch}_step{global_step}_latest")
                     if accelerator.is_main_process:
                         unwrapped_model = accelerator.unwrap_model(model)
-                        save_checkpoint_with_train_config(unwrapped_model, version_dir, args)
+                        save_checkpoint_with_train_config(
+                            unwrapped_model,
+                            version_dir,
+                            args,
+                            overwrite_pattern=f"epoch{epoch}_step*_latest",
+                        )
 
         version_dir = os.path.join(save_dir, f"epoch{epoch}_step{global_step}_final")
         if accelerator.is_main_process:
             unwrapped_model = accelerator.unwrap_model(model)
-            save_checkpoint_with_train_config(unwrapped_model, version_dir, args)
+            save_checkpoint_with_train_config(
+                unwrapped_model,
+                version_dir,
+                args,
+            )
 
     accelerator.print("Training end")
     accelerator.end_training()
