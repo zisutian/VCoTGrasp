@@ -19,9 +19,10 @@ import io
 _LMDB_ENV_CACHE = {}
 
 def _get_lmdb_env(path:str, max_readers:int=2048):
-    if path not in _LMDB_ENV_CACHE:
-        _LMDB_ENV_CACHE[path] = lmdb.open(path, readonly=True, lock=False, readahead=False, meminit=False, max_readers=max_readers)
-    return _LMDB_ENV_CACHE[path]
+    cache_key = (os.getpid(), path)
+    if cache_key not in _LMDB_ENV_CACHE:
+        _LMDB_ENV_CACHE[cache_key] = lmdb.open(path, readonly=True, lock=False, readahead=False, meminit=False, max_readers=max_readers)
+    return _LMDB_ENV_CACHE[cache_key]
 
 
 #======= LMDB 安全读取辅助函数
@@ -36,8 +37,7 @@ def _get_lmdb_bytes(env, key_str: str) -> bytes:
 
 #====== 强制子进程重置 LMDB reader 状态，避免继承主进程的事务槽位
 def _lmdb_worker_init_fn(worker_id):
-    import lmdb
-    pass
+    _LMDB_ENV_CACHE.clear()
 
 
 def get_dataloaders(
@@ -168,10 +168,21 @@ class GraspAnythingForGraspGeneration(Dataset):
         self.input_image_size = 416
         self.output_image_size = 224
 
-        #LMDB获取
-        self.env_img   = _get_lmdb_env(rgb_lmdb_path)
-        self.env_grasp = _get_lmdb_env(grasp_lmdb_path)
-        self.env_mask  = _get_lmdb_env(mask_lmdb_path)
+        self.rgb_lmdb_path = rgb_lmdb_path
+        self.grasp_lmdb_path = grasp_lmdb_path
+        self.mask_lmdb_path = mask_lmdb_path
+
+    @property
+    def env_img(self):
+        return _get_lmdb_env(self.rgb_lmdb_path)
+
+    @property
+    def env_grasp(self):
+        return _get_lmdb_env(self.grasp_lmdb_path)
+
+    @property
+    def env_mask(self):
+        return _get_lmdb_env(self.mask_lmdb_path)
 
     def __len__(self):
         return self.data.shape[0]
@@ -232,8 +243,16 @@ class GraspAnythingForBbox(Dataset):
         self.input_image_size = 416
         self.output_image_size = 224
 
-        self.env_img   = _get_lmdb_env(rgb_lmdb_path)
-        self.env_mask  = _get_lmdb_env(mask_lmdb_path)
+        self.rgb_lmdb_path = rgb_lmdb_path
+        self.mask_lmdb_path = mask_lmdb_path
+
+    @property
+    def env_img(self):
+        return _get_lmdb_env(self.rgb_lmdb_path)
+
+    @property
+    def env_mask(self):
+        return _get_lmdb_env(self.mask_lmdb_path)
 
     def __len__(self):
         return self.data.shape[0]
