@@ -13,7 +13,6 @@ from constants import *
 from inference import VCoTGraspInferencer, eval_grasp_all_labels
 
 
-TRAIN_CONFIG_NAME = "train_config.json"
 MODEL_CONFIG_NAME = "config.json"
 
 
@@ -23,42 +22,30 @@ def load_json(path):
 
 
 def load_checkpoint_eval_config(checkpoint_dir):
-    train_config_path = os.path.join(checkpoint_dir, TRAIN_CONFIG_NAME)
-    if os.path.isfile(train_config_path):
-        train_config = load_json(train_config_path)
-        return {
-            "use_bbox": train_config.get("use_bbox"),
-            "action_head": train_config.get("action_head"),
-            "model_config_path": train_config.get("model_config_path"),
-            "source": train_config_path,
-        }
-
-    model_config_path = os.path.join(checkpoint_dir, MODEL_CONFIG_NAME)
-    if os.path.isfile(model_config_path):
-        model_config = load_json(model_config_path)
+    checkpoint_config_path = os.path.join(checkpoint_dir, MODEL_CONFIG_NAME)
+    if os.path.isfile(checkpoint_config_path):
+        model_config = load_json(checkpoint_config_path)
         arch_config = model_config.get("arch_config", {})
         return {
             "use_bbox": arch_config.get("use_bbox"),
             "action_head": arch_config.get("action_head"),
-            "model_config_path": model_config_path,
-            "source": model_config_path,
+            "source": checkpoint_config_path,
         }
 
     raise FileNotFoundError(
-        f"Cannot find {TRAIN_CONFIG_NAME} or {MODEL_CONFIG_NAME} in checkpoint dir: {checkpoint_dir}"
+        f"Cannot find {MODEL_CONFIG_NAME} in checkpoint dir: {checkpoint_dir}"
     )
 
 
 def resolve_eval_config(args):
     checkpoint_config = load_checkpoint_eval_config(args.load_checkpoint_dir)
-    use_bbox = checkpoint_config["use_bbox"] if args.use_bbox is None else args.use_bbox
-    action_head = checkpoint_config["action_head"] if args.action_head is None else args.action_head
-    model_config_path = args.model_config_path or checkpoint_config["model_config_path"]
+    use_bbox = checkpoint_config["use_bbox"]
+    action_head = checkpoint_config["action_head"]
 
     if use_bbox is None:
-        raise ValueError("use_bbox is missing. Add it to train_config.json/config.json or pass --use-bbox/--no-use-bbox.")
+        raise ValueError("use_bbox is missing. Add it to checkpoint config.json.")
     if not action_head:
-        raise ValueError("action_head is missing. Add it to train_config.json/config.json or pass --action-head.")
+        raise ValueError("action_head is missing. Add it to checkpoint config.json.")
 
     return argparse.Namespace(
         load_checkpoint_dir=args.load_checkpoint_dir,
@@ -69,7 +56,6 @@ def resolve_eval_config(args):
         visualize_dir=args.visualize_dir,
         result_dir=args.result_dir,
         use_lora=args.use_lora,
-        model_config_path=model_config_path,
         config_source=checkpoint_config["source"],
         save_image_range=args.save_image_range,
         iou_threshold=args.iou_threshold,
@@ -88,11 +74,8 @@ def get_split_csv_path(test_split):
 def eval_split(args, test_split):
     inferencer = VCoTGraspInferencer(
         args.load_checkpoint_dir,
-        use_bbox=args.use_bbox,
-        action_head=args.action_head,
         device=args.device,
         use_lora=args.use_lora,
-        model_config_path=args.model_config_path,
     )
 
     visualize_dir = os.path.join(args.visualize_dir, test_split)
@@ -165,11 +148,6 @@ def main():
     parser.add_argument("--visualize-dir", type=str, default="results/visualize/")
     parser.add_argument("--result-dir", type=str, default="results/")
     parser.add_argument("--use-lora", action="store_true")
-
-    parser.add_argument("--use-bbox", dest="use_bbox", action="store_true", default=None)
-    parser.add_argument("--no-use-bbox", dest="use_bbox", action="store_false")
-    parser.add_argument("--action-head", type=str, choices=["MLP", "Diffusion", "LM_pretrained", "LM_new"])
-    parser.add_argument("--model-config-path", type=str)
 
     parser.add_argument("--save-image-range", type=int, default=100)
     parser.add_argument("--iou-threshold", type=float, default=0.25)

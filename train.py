@@ -3,6 +3,7 @@ import argparse
 import json
 import shutil
 import glob
+import warnings
 
 import torch
 from torch import optim
@@ -11,11 +12,23 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from transformers import get_cosine_schedule_with_warmup, get_constant_schedule, set_seed
 from accelerate import Accelerator
 
-from model import ArchConfig, VCoTGraspConfig, VCoTGraspForConditionalGeneration, VCoTGraspProcessor
+from model import VCoTGraspConfig, VCoTGraspForConditionalGeneration, VCoTGraspProcessor
 from data import get_dataloaders
 
 
 DEFAULT_TRAIN_CONFIG_PATH = "train_configs/grasp_anything_mlp.json"
+TRAIN_CONFIG_NAME = "train_config.json"
+CHECKPOINT_TRAIN_CONFIG_EXCLUDE_KEYS = {
+    "load_checkpoint_dir",
+    "model_config_path",
+    "save_root",
+    "tensorboard_root",
+    "train_config_path",
+    "run_name",
+    "overwrite_checkpoints",
+    "use_bbox",
+    "action_head",
+}
 
 
 def load_train_config(config_path):
@@ -25,10 +38,72 @@ def load_train_config(config_path):
     return argparse.Namespace(**config)
 
 
+def apply_checkpoint_train_config(args):
+    if not args.load_checkpoint_dir:
+        return args
+
+    checkpoint_train_config_path = os.path.join(args.load_checkpoint_dir, TRAIN_CONFIG_NAME)
+    if not os.path.isfile(checkpoint_train_config_path):
+        warnings.warn(
+            f"Cannot find {TRAIN_CONFIG_NAME} in checkpoint dir: {args.load_checkpoint_dir}. "
+            "Using the current train config.",
+            UserWarning,
+        )
+        return args
+
+    with open(checkpoint_train_config_path, "r", encoding="utf-8") as f:
+        checkpoint_train_config = json.load(f)
+
+    current_config = vars(args)
+    conflicts = []
+    for key, value in checkpoint_train_config.items():
+        if key in CHECKPOINT_TRAIN_CONFIG_EXCLUDE_KEYS:
+            continue
+        if key in current_config and current_config[key] != value:
+            conflicts.append((key, current_config[key], value))
+
+    if conflicts:
+        conflict_lines = [
+            f"  {key}: current={current_value!r}, checkpoint={checkpoint_value!r}"
+            for key, current_value, checkpoint_value in conflicts
+        ]
+        warnings.warn(
+            "Current train config conflicts with checkpoint train config:\n"
+            + "\n".join(conflict_lines)
+            + "\nUsing the checkpoint's training settings for these fields.",
+            UserWarning,
+        )
+
+    for key, value in checkpoint_train_config.items():
+        if key not in CHECKPOINT_TRAIN_CONFIG_EXCLUDE_KEYS:
+            current_config[key] = value
+
+    return argparse.Namespace(**current_config)
+
+
 def get_torch_dtype(dtype_name):
     if isinstance(dtype_name, torch.dtype):
         return dtype_name
     return getattr(torch, dtype_name)
+
+
+def warn_if_train_config_arch_conflicts(args, arch_config, source):
+    conflicts = []
+    for key in ("use_bbox", "action_head"):
+        if hasattr(args, key) and getattr(args, key) != getattr(arch_config, key):
+            conflicts.append((key, getattr(args, key), getattr(arch_config, key)))
+
+    if conflicts:
+        conflict_lines = [
+            f"  {key}: train_config={train_value!r}, {source}={arch_value!r}"
+            for key, train_value, arch_value in conflicts
+        ]
+        warnings.warn(
+            "Train config architecture choices conflict with checkpoint config:\n"
+            + "\n".join(conflict_lines)
+            + f"\nUsing architecture choices from {source}.",
+            UserWarning,
+        )
 
 
 def save_checkpoint_with_train_config(model, save_dir, train_args, overwrite_pattern=None):
@@ -40,38 +115,48 @@ def save_checkpoint_with_train_config(model, save_dir, train_args, overwrite_pat
         elif os.path.isdir(save_dir):
             shutil.rmtree(save_dir)
     model.save_pretrained(save_dir)
+    train_config = {
+        key: value
+        for key, value in vars(train_args).items()
+        if key not in CHECKPOINT_TRAIN_CONFIG_EXCLUDE_KEYS
+    }
     with open(os.path.join(save_dir, "train_config.json"), "w", encoding="utf-8") as f:
-        json.dump(vars(train_args), f, indent=2)
+        json.dump(train_config, f, indent=2)
 
 
 def main(args):
     set_seed(args.seed)
     accelerator = Accelerator(log_with="tensorboard", project_dir=args.tensorboard_root)
-    hyper_params = vars(args)
-    accelerate_hyper_params = {
-        "num_processes": accelerator.num_processes,
-        "gradient_accumulation_steps": accelerator.gradient_accumulation_steps,
-    }
-    hyper_params.update(**accelerate_hyper_params)
 
     train_torch_dtype = get_torch_dtype(args.torch_dtype)
 
-    # Runtime architecture choices come from the train config; backbone defaults come from model/config.json.
-    runtime_arch_config = ArchConfig(args.use_bbox, args.action_head)
     if not args.load_checkpoint_dir:
         # init a model
         model_config = VCoTGraspConfig.from_json_file(args.model_config_path)
-        model_config.arch_config = runtime_arch_config
+        if hasattr(args, "use_bbox"):
+            model_config.arch_config.use_bbox = args.use_bbox
+        if hasattr(args, "action_head"):
+            model_config.arch_config.action_head = args.action_head
         model_config.set_attn_implementation(**args.attn_implementation)
         model = VCoTGraspForConditionalGeneration(model_config)
-        processor = VCoTGraspProcessor(runtime_arch_config)
     else:
         model = VCoTGraspForConditionalGeneration.from_pretrained(
             args.load_checkpoint_dir,
             torch_dtype=train_torch_dtype,
             attn_implementation=args.attn_implementation,
         )
-        processor = VCoTGraspProcessor(runtime_arch_config)
+        warn_if_train_config_arch_conflicts(args, model.config.arch_config, "checkpoint config")
+
+    runtime_arch_config = model.config.arch_config
+    processor = VCoTGraspProcessor(runtime_arch_config)
+
+    hyper_params = vars(args).copy()
+    hyper_params["use_bbox"] = runtime_arch_config.use_bbox
+    hyper_params["action_head"] = runtime_arch_config.action_head
+    hyper_params.update(
+        num_processes=accelerator.num_processes,
+        gradient_accumulation_steps=accelerator.gradient_accumulation_steps,
+    )
 
     model.set_trainable(
         image_encoder=args.train_image_encoder,
@@ -177,4 +262,5 @@ if __name__ == "__main__":
 
     cli_args = parser.parse_args()
     args = load_train_config(cli_args.train_config)
+    args = apply_checkpoint_train_config(args)
     main(args)

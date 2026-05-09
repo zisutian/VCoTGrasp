@@ -1,12 +1,14 @@
+import os
+
 import cv2
 import torch
 from peft import PeftModel
 
-from model import VCoTGraspForConditionalGeneration, VCoTGraspProcessor, ArchConfig, VCoTGraspConfig
+from model import VCoTGraspForConditionalGeneration, VCoTGraspProcessor, VCoTGraspConfig
 from data import *
 
 
-MODEL_CONFIG_PATH = "model/config.json"
+CHECKPOINT_MODEL_CONFIG_NAME = "config.json"
 INFERENCE_TORCH_DTYPE = torch.bfloat16
 
 
@@ -14,22 +16,24 @@ class VCoTGraspInferencer:
     def __init__(
         self,
         checkpoint_dir,
-        use_bbox,
-        action_head,
         input_image_size=416,
         device="cuda",
         use_lora=False,
-        model_config_path=MODEL_CONFIG_PATH,
     ):
-        runtime_arch_config = ArchConfig(use_bbox=use_bbox, action_head=action_head)
         if not use_lora:
             self.model = VCoTGraspForConditionalGeneration.from_pretrained(
                 checkpoint_dir,
                 torch_dtype=INFERENCE_TORCH_DTYPE,
             ).to(device)
+            runtime_arch_config = self.model.config.arch_config
         else:
+            model_config_path = os.path.join(checkpoint_dir, CHECKPOINT_MODEL_CONFIG_NAME)
+            if not os.path.isfile(model_config_path):
+                raise FileNotFoundError(
+                    f"Cannot find {CHECKPOINT_MODEL_CONFIG_NAME} in checkpoint dir: {checkpoint_dir}"
+                )
             model_config = VCoTGraspConfig.from_json_file(model_config_path)
-            model_config.arch_config = runtime_arch_config
+            runtime_arch_config = model_config.arch_config
             # disable flash attention on v100
             model_config.set_attn_implementation(text_config="sdpa", vision_config="sdpa")
             model = VCoTGraspForConditionalGeneration(model_config)
@@ -38,8 +42,8 @@ class VCoTGraspInferencer:
         self.processor = VCoTGraspProcessor(runtime_arch_config)
         self.device = device
 
-        self.use_bbox = use_bbox
-        self.action_head = action_head
+        self.use_bbox = runtime_arch_config.use_bbox
+        self.action_head = runtime_arch_config.action_head
         self.input_image_size = input_image_size
 
     def get_bbox_prompt(self, obj_name):

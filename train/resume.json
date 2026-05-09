@@ -1,0 +1,7 @@
+{
+  "load_checkpoint_dir": "checkpoints/sr/run1/epoch2_step6000_final",
+  "save_root": "checkpoints/sr",
+  "tensorboard_root": "checkpoints/tb",
+  "run_name": "run1_resume",
+  "overwrite_checkpoints": false
+}
